@@ -2,14 +2,11 @@
 import os
 import json
 import streamlit as st
-from dotenv import load_dotenv
 from langchain_community.embeddings import SentenceTransformerEmbeddings
 from langchain_community.vectorstores import Chroma
 from langdetect import detect
 import requests
 from typing import List
-
-load_dotenv()
 
 st.set_page_config(page_title="Employee Handbook Assistant", page_icon="🧾")
 st.title("Employee Handbook Assistant")
@@ -18,9 +15,11 @@ st.write("Ask a question and I will answer using only the content inside the pro
 CHROMA_DIR = "chroma_db"
 EMBED_MODEL = "all-MiniLM-L6-v2"
 TOP_K = 4
+
+# Groq API settings
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 GROQ_MODEL = os.getenv("GROQ_MODEL", "llama3-13b")
-GROQ_COMPLETION_URL = "https://api.groq.com/v1/completions"
+GROQ_COMPLETION_URL = "https://api.groq.com/openai/v1/chat/completions"
 
 if not GROQ_API_KEY:
     st.warning("GROQ_API_KEY not found. Set it in your environment or Streamlit secrets.")
@@ -48,7 +47,7 @@ for msg in st.session_state.messages:
 
 PROMPT_PREFIX = (
     "You are an assistant. You MUST answer using ONLY the provided CONTEXT below. "
-    "Do NOT use any outside knowledge. If the exact answer is not present in CONTEXT, reply exactly: \"I don't know.\" "
+    "Do NOT use any outside knowledge. If the exact answer is not present in CONTEXT, reply exactly: 'I don't know.' "
     "Keep the answer short and in the same language as the question. If multiple sections apply, synthesize them briefly.\n\n"
 )
 
@@ -67,7 +66,10 @@ def call_groq(prompt: str, max_tokens: int = 512, temperature: float = 0.0) -> s
     }
     payload = {
         "model": GROQ_MODEL,
-        "prompt": prompt,
+        "messages": [
+            {"role": "system", "content": "You are a helpful assistant that answers only from the given context."},
+            {"role": "user", "content": prompt}
+        ],
         "max_tokens": max_tokens,
         "temperature": temperature,
     }
@@ -84,11 +86,7 @@ def call_groq(prompt: str, max_tokens: int = 512, temperature: float = 0.0) -> s
     text = None
     try:
         if "choices" in data and len(data["choices"]) > 0:
-            ch0 = data["choices"][0]
-            if isinstance(ch0, dict):
-                text = ch0.get("text") or (ch0.get("message") and ch0["message"].get("content"))
-        if not text:
-            text = data.get("text") or data.get("completion") or data.get("result") or None
+            text = data["choices"][0]["message"]["content"]
     except Exception:
         text = None
 
@@ -97,6 +95,7 @@ def call_groq(prompt: str, max_tokens: int = 512, temperature: float = 0.0) -> s
 
     return text.strip()
 
+# Chat UI
 if prompt_text := st.chat_input("Ask about the Employee Handbook..."):
     st.session_state.messages.append({"role": "user", "content": prompt_text})
     st.chat_message("user").write(prompt_text)
