@@ -1,11 +1,8 @@
-streamlit
-chromadb
-sentence-transformers
 langchain
 langchain-community
-python-dotenv
-pypdf
-python-docx
-tqdm
-requests
-langdetect
+langchain-core
+langchain-text-splitters
+langchain-groq
+chromadb
+sentence-transformers
+streamlit
