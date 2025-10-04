@@ -1,110 +1,105 @@
 import streamlit as st
 from langchain_community.vectorstores import Chroma
 from langchain_community.embeddings import SentenceTransformerEmbeddings
+from langchain.prompts import ChatPromptTemplate
 from langchain_groq import ChatGroq
-from deep_translator import GoogleTranslator
 import re
 
 # ----------------------------
 # CONFIG
 # ----------------------------
-CHROMA_DIR = "chroma_db"
 EMBED_MODEL = "all-MiniLM-L6-v2"
-
-# Load Groq API key from Streamlit secrets
-GROQ_API_KEY = st.secrets["GROQ_API_KEY"]
-
-# Initialize Groq LLM
-llm = ChatGroq(model="llama-3.1-8b-instant", api_key=GROQ_API_KEY)
-
-# Initialize embeddings + Chroma
-embeddings = SentenceTransformerEmbeddings(model_name=EMBED_MODEL)
-db = Chroma(persist_directory=CHROMA_DIR, embedding_function=embeddings)
+CHROMA_DIR = "chroma_db"
+TOP_K = 6  # number of chunks to retrieve
+llm = ChatGroq(model="llama-3.1-8b-instant", temperature=0)
 
 # ----------------------------
-# Helper Functions
+# Translation / Cleaning
 # ----------------------------
 def clean_and_translate(query: str) -> str:
-    """Translate Roman Urdu → English using local translator."""
-    try:
-        translated = GoogleTranslator(source="auto", target="en").translate(query)
-    except Exception:
-        translated = query
-    return translated.strip()
+    """Translate Roman Urdu to English if detected."""
+    translation_prompt = f"""
+    You are a language assistant.
+    The user may ask in English or Roman Urdu.
+    1. If it's Roman Urdu, translate it into clear English.
+    2. If it's already English, keep it as-is.
+    User query: {query}
+    """
 
+    response = llm.invoke([("user", translation_prompt)])
+    return response.content.strip()
+
+# ----------------------------
+# Keyword Booster
+# ----------------------------
 def boost_query(query: str) -> str:
-    """Boost queries by appending domain-specific keywords."""
-    keywords = {
-        "leave": ["leave", "annual leave", "casual leave", "sick leave", "holiday", "vacation"],
-        "notice": ["notice period", "resignation", "exit policy"],
-        "probation": ["probation", "confirmation", "joining rules"],
-        "working hours": ["working hours", "timings", "shifts"],
-        "other": ["benefits", "allowances", "disciplinary", "promotion", "increment"]
-    }
+    """Add common HR-related keywords to improve retrieval."""
+    boost_terms = "leave, annual leave, casual leave, sick leave, vacation, notice period, resignation, working hours, salary, policy, entitlement"
+    return f"{query}. Related terms: {boost_terms}"
 
-    boosted = query
-    for key, kws in keywords.items():
-        if key in query.lower():
-            boosted += " " + " ".join(kws)
-    return boosted
+# ----------------------------
+# Retriever
+# ----------------------------
+def retrieve_docs(query: str):
+    """Retrieve top chunks from Chroma."""
+    embeddings = SentenceTransformerEmbeddings(model_name=EMBED_MODEL)
+    db = Chroma(persist_directory=CHROMA_DIR, embedding_function=embeddings)
+    return db.similarity_search(query, k=TOP_K)
 
-def search_docs(query: str, k: int = 6):
-    """Retrieve top-k relevant chunks from Chroma with keyword boosting."""
-    boosted_query = boost_query(query)
-    results = db.similarity_search(boosted_query, k=k)
-    return results
-
+# ----------------------------
+# Answer Builder (improved)
+# ----------------------------
 def build_answer(query: str, docs):
-    """Force the model to only answer from handbook content."""
+    """Force the model to only answer from handbook content, prioritizing keywords."""
     if not docs:
         return "Sorry, I couldn’t find anything in the handbook for that."
 
-    context_texts = "\n\n".join([d.page_content for d in docs])
+    # Prioritize docs with relevant HR terms
+    priority_keywords = ["leave", "annual leave", "quota", "entitlement", "notice period", "resignation"]
+    sorted_docs = sorted(
+        docs,
+        key=lambda d: sum(kw in d.page_content.lower() for kw in priority_keywords),
+        reverse=True
+    )
 
+    # Take top chunks
+    context_texts = "\n\n".join([d.page_content for d in sorted_docs[:4]])
+
+    # Stronger answering prompt
     prompt = f"""
-    You are an HR assistant. 
-    ONLY use the following Employee Handbook content to answer. 
-    Do NOT guess. 
-    If the answer is not found in the handbook, reply: "Sorry, I couldn’t find anything in the handbook."
+    You are an HR assistant for employees.
+    ONLY use the following Employee Handbook content to answer.
+    - Quote exact figures (e.g., number of days, percentages, periods).
+    - If the info is not present, reply: "Sorry, I couldn’t find anything in the handbook."
+    - Do not guess.
 
     Handbook Content:
     {context_texts}
 
     Question: {query}
 
-    Answer strictly based on handbook content:
+    Final Answer:
     """
 
     response = llm.invoke([("user", prompt)])
     return response.content.strip()
 
 # ----------------------------
-# STREAMLIT APP
+# Streamlit UI
 # ----------------------------
-st.set_page_config(page_title="Employee Handbook Assistant", page_icon="📘")
-
 st.title("📘 Employee Handbook Assistant")
 st.write("Ask a question in English or Roman Urdu about HR policies.")
 
-query = st.text_input("Your question:")
+user_q = st.text_input("Your question:")
 
-if query:
-    refined_query = clean_and_translate(query)
+if user_q:
+    refined_query = clean_and_translate(user_q)
     boosted_query = boost_query(refined_query)
 
-    st.write(f"🔍 Interpreted Query: **{refined_query}**")
-    if boosted_query != refined_query:
-        st.caption(f"(Boosted for better retrieval: {boosted_query})")
+    st.write(f"🔍 Interpreted Query: {refined_query}")
 
-    docs = search_docs(refined_query, k=6)
+    docs = retrieve_docs(boosted_query)
     answer = build_answer(refined_query, docs)
 
     st.write("### Answer:")
     st.write(answer)
-
-    # Show sources
-    with st.expander("📂 Sources"):
-        for i, d in enumerate(docs, 1):
-            st.markdown(f"**Source {i}:** {d.metadata.get('source','unknown')}")
-            snippet = re.sub(r"\s+", " ", d.page_content[:400])
-            st.caption(snippet + "...")
