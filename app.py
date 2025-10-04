@@ -1,92 +1,91 @@
 import streamlit as st
+import re
+from langdetect import detect
 from langchain_community.vectorstores import Chroma
 from langchain_community.embeddings import SentenceTransformerEmbeddings
 from langchain.prompts import ChatPromptTemplate
 from langchain_groq import ChatGroq
-from langdetect import detect
-import re
 
 # ----------------------------
 # Config
 # ----------------------------
-CHROMA_DIR = "chroma_db"
 EMBED_MODEL = "all-MiniLM-L6-v2"
-TOP_K = 6
+CHROMA_DIR = "chroma_db"
+
+# Force embeddings to CPU (fix for Streamlit Cloud)
+embeddings = SentenceTransformerEmbeddings(
+    model_name=EMBED_MODEL,
+    model_kwargs={"device": "cpu"}
+)
+vectordb = Chroma(persist_directory=CHROMA_DIR, embedding_function=embeddings)
+
+llm = ChatGroq(
+    groq_api_key=st.secrets["GROQ_API_KEY"],
+    model="llama3-8b-8192"
+)
 
 # ----------------------------
-# Load embedding model and DB
+# Keyword Booster
 # ----------------------------
-embeddings = SentenceTransformerEmbeddings(model_name=EMBED_MODEL)
-db = Chroma(persist_directory=CHROMA_DIR, embedding_function=embeddings)
+KEYWORD_BOOST = {
+    "leave": ["leave entitlement", "annual leave", "vacation", "casual leave", "sick leave", "chutti"],
+    "notice": ["notice period", "resignation", "exit", "contract termination"],
+    "job": ["additional employment", "dual job", "outside work", "secondary employment"]
+}
+
+def boost_query(query: str) -> str:
+    """Boost queries with HR-related synonyms."""
+    q = query.lower()
+    for key, synonyms in KEYWORD_BOOST.items():
+        if key in q:
+            query += " " + " ".join(synonyms)
+    return query
 
 # ----------------------------
-# Init LLM (Groq)
-# ----------------------------
-llm = ChatGroq(model="llama-3.1-70b-versatile", temperature=0)
-
-# ----------------------------
-# Preprocess Query (clean + Roman Urdu → English)
+# Translation & Cleaning
 # ----------------------------
 def clean_and_translate(query: str) -> str:
-    """Cleans user query and translates Roman Urdu to English if needed."""
-    query = query.strip()
-    query = re.sub(r"\s+", " ", query)
-
+    """Detect language, translate Roman Urdu → English if needed."""
     try:
         lang = detect(query)
-    except Exception:
+    except:
         lang = "en"
 
     if lang != "en":
         translation_prompt = ChatPromptTemplate.from_messages([
-            ("system", "You are a translator. Convert Roman Urdu text into clear English, keeping the meaning."),
+            ("system", "You are a translator. Convert the following text from Roman Urdu to English."),
             ("human", query)
         ])
-        try:
-            translated = llm.invoke(translation_prompt.format_messages())
-            return translated.content.strip()
-        except Exception:
-            return query  # fallback if translation fails
+        translated = llm.invoke(translation_prompt.format_messages())
+        query = translated.content.strip()
 
+    query = re.sub(r"[^a-zA-Z0-9\s]", "", query)
     return query
 
 # ----------------------------
-# Retrieval
-# ----------------------------
-def retrieve_answer(query: str):
-    """Search similar docs from Chroma."""
-    try:
-        docs = db.similarity_search(query, k=TOP_K)
-    except Exception:
-        docs = []
-    return docs
-
-# ----------------------------
-# Main Q&A Pipeline
+# Retrieval + LLM Answer
 # ----------------------------
 def answer_question(query: str):
-    """Main pipeline: preprocess → retrieve → LLM answer."""
-    refined_query = clean_and_translate(query)
-    docs = retrieve_answer(refined_query)
+    cleaned = clean_and_translate(query)
+    boosted = boost_query(cleaned)
+
+    docs = vectordb.similarity_search(boosted, k=5)
 
     if not docs:
-        return refined_query, "Sorry, I couldn’t find anything in the handbook."
+        return boosted, "Sorry, I couldn’t find anything in the handbook."
 
-    # Trim docs to avoid hitting Groq’s token limits
-    trimmed_docs = [d.page_content[:800] for d in docs[:3]]
-    context = "\n\n".join(trimmed_docs)
+    context = "\n\n".join([d.page_content for d in docs])
 
     prompt = ChatPromptTemplate.from_messages([
-        ("system", "You are an HR assistant. Answer ONLY from the Employee Handbook. "
-                   "If the answer is not present, say: 'Sorry, I couldn’t find anything in the handbook.'"),
-        ("human", f"Employee Handbook Context:\n{context}\n\nUser Question: {refined_query}\n\nAnswer:")
+        ("system",
+         "You are an HR assistant. Answer ONLY from the Employee Handbook text below. "
+         "If the answer is not in the handbook, reply: 'Sorry, I couldn’t find anything in the handbook.'\n\n"
+         f"Employee Handbook:\n{context}"),
+        ("human", boosted)
     ])
 
-    try:
-        response = llm.invoke(prompt.format_messages())
-        return refined_query, response.content
-    except Exception as e:
-        return refined_query, f"⚠️ Error while generating answer: {str(e)}"
+    response = llm.invoke(prompt.format_messages())
+    return boosted, response.content.strip()
 
 # ----------------------------
 # Streamlit UI
@@ -98,5 +97,5 @@ query = st.text_input("Your question:")
 
 if query:
     refined_query, answer = answer_question(query)
-    st.write(f"🔍 **Interpreted Query:** {refined_query}")
-    st.write(f"**Answer:**\n{answer}")
+    st.markdown(f"🔍 **Interpreted Query:** {refined_query}")
+    st.markdown(f"### Answer:\n{answer}")
