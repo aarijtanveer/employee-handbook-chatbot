@@ -1,87 +1,81 @@
 import streamlit as st
 from langchain_community.vectorstores import Chroma
 from langchain_community.embeddings import SentenceTransformerEmbeddings
-from langchain.prompts import ChatPromptTemplate
 from langchain_groq import ChatGroq
 import re
 
 # ----------------------------
-# CONFIG
+# Setup
 # ----------------------------
 EMBED_MODEL = "all-MiniLM-L6-v2"
 CHROMA_DIR = "chroma_db"
-TOP_K = 6  # number of chunks to retrieve
-llm = ChatGroq(model="llama-3.1-8b-instant", temperature=0)
+
+embeddings = SentenceTransformerEmbeddings(model_name=EMBED_MODEL)
+db = Chroma(persist_directory=CHROMA_DIR, embedding_function=embeddings)
+
+llm = ChatGroq(
+    model="llama-3.1-8b-instant",
+    temperature=0,
+)
 
 # ----------------------------
-# Translation / Cleaning
+# Preprocess Query (clean + translate Roman Urdu if needed)
 # ----------------------------
 def clean_and_translate(query: str) -> str:
-    """Translate Roman Urdu to English if detected."""
-    translation_prompt = f"""
-    You are a language assistant.
-    The user may ask in English or Roman Urdu.
-    1. If it's Roman Urdu, translate it into clear English.
-    2. If it's already English, keep it as-is.
-    User query: {query}
-    """
+    query = re.sub(r"\s+", " ", query.strip())
 
-    response = llm.invoke([("user", translation_prompt)])
-    return response.content.strip()
+    detect_lang_prompt = [
+        ("system", "You are a language detector. Detect if this query is English or Roman Urdu."),
+        ("user", query),
+    ]
+    detection = llm.invoke(detect_lang_prompt).content.lower()
 
-# ----------------------------
-# Keyword Booster
-# ----------------------------
-def boost_query(query: str) -> str:
-    """Add common HR-related keywords to improve retrieval."""
-    boost_terms = "leave, annual leave, casual leave, sick leave, vacation, notice period, resignation, working hours, salary, policy, entitlement"
-    return f"{query}. Related terms: {boost_terms}"
+    if "roman urdu" in detection:
+        translation_prompt = [
+            ("system", "You are a translator. Translate Roman Urdu into clear English without changing meaning."),
+            ("user", query),
+        ]
+        translated = llm.invoke(translation_prompt).content
+        return translated.strip()
+
+    return query
 
 # ----------------------------
-# Retriever
-# ----------------------------
-def retrieve_docs(query: str):
-    """Retrieve top chunks from Chroma."""
-    embeddings = SentenceTransformerEmbeddings(model_name=EMBED_MODEL)
-    db = Chroma(persist_directory=CHROMA_DIR, embedding_function=embeddings)
-    return db.similarity_search(query, k=TOP_K)
-
-# ----------------------------
-# Answer Builder (improved)
+# Force Answers Only From Handbook
 # ----------------------------
 def build_answer(query: str, docs):
-    """Force the model to only answer from handbook content, prioritizing keywords."""
     if not docs:
         return "Sorry, I couldn’t find anything in the handbook for that."
 
-    # Prioritize docs with relevant HR terms
-    priority_keywords = ["leave", "annual leave", "quota", "entitlement", "notice period", "resignation"]
+    # Keyword boosting for relevance
+    priority_keywords = [
+        "leave", "annual leave", "casual leave", "sick leave",
+        "entitlement", "notice period", "resignation", "probation",
+        "working hours", "holidays", "overtime"
+    ]
     sorted_docs = sorted(
         docs,
         key=lambda d: sum(kw in d.page_content.lower() for kw in priority_keywords),
         reverse=True
     )
 
-    # Take top chunks
     context_texts = "\n\n".join([d.page_content for d in sorted_docs[:4]])
 
-    # Stronger answering prompt
-    prompt = f"""
-    You are an HR assistant for employees.
-    ONLY use the following Employee Handbook content to answer.
-    - Quote exact figures (e.g., number of days, percentages, periods).
-    - If the info is not present, reply: "Sorry, I couldn’t find anything in the handbook."
-    - Do not guess.
+    messages = [
+        ("system", "You are an HR assistant. ONLY answer using the Employee Handbook context below. "
+                   "If the answer is not in the handbook, reply exactly: "
+                   "'Sorry, I couldn’t find anything in the handbook.' Do not guess. Do not use outside knowledge."),
+        ("user", f"""
+        ----------------------
+        Employee Handbook Context:
+        {context_texts}
+        ----------------------
 
-    Handbook Content:
-    {context_texts}
+        Question: {query}
+        """)
+    ]
 
-    Question: {query}
-
-    Final Answer:
-    """
-
-    response = llm.invoke([("user", prompt)])
+    response = llm.invoke(messages)
     return response.content.strip()
 
 # ----------------------------
@@ -90,15 +84,13 @@ def build_answer(query: str, docs):
 st.title("📘 Employee Handbook Assistant")
 st.write("Ask a question in English or Roman Urdu about HR policies.")
 
-user_q = st.text_input("Your question:")
+query = st.text_input("Your question:")
 
-if user_q:
-    refined_query = clean_and_translate(user_q)
-    boosted_query = boost_query(refined_query)
+if query:
+    refined_query = clean_and_translate(query)
+    st.write("🔍 **Interpreted Query:**", refined_query)
 
-    st.write(f"🔍 Interpreted Query: {refined_query}")
-
-    docs = retrieve_docs(boosted_query)
+    docs = db.similarity_search(refined_query, k=6)
     answer = build_answer(refined_query, docs)
 
     st.write("### Answer:")
