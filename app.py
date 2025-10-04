@@ -1,7 +1,6 @@
 import streamlit as st
 from langchain_community.vectorstores import Chroma
 from langchain_community.embeddings import SentenceTransformerEmbeddings
-from langchain.prompts import ChatPromptTemplate
 from langchain_groq import ChatGroq
 from deep_translator import GoogleTranslator
 import re
@@ -26,40 +25,54 @@ db = Chroma(persist_directory=CHROMA_DIR, embedding_function=embeddings)
 # Helper Functions
 # ----------------------------
 def clean_and_translate(query: str) -> str:
-    """
-    Translate Roman Urdu → English using local translator.
-    If it's already English, it will stay unchanged.
-    """
+    """Translate Roman Urdu → English using local translator."""
     try:
         translated = GoogleTranslator(source="auto", target="en").translate(query)
-    except Exception as e:
-        print(f"Translation failed, using raw query: {e}")
+    except Exception:
         translated = query
     return translated.strip()
 
-def search_docs(query: str, k: int = 5):
-    """Retrieve top-k relevant chunks from Chroma."""
-    results = db.similarity_search(query, k=k)
+def boost_query(query: str) -> str:
+    """Boost queries by appending domain-specific keywords."""
+    keywords = {
+        "leave": ["leave", "annual leave", "casual leave", "sick leave", "holiday", "vacation"],
+        "notice": ["notice period", "resignation", "exit policy"],
+        "probation": ["probation", "confirmation", "joining rules"],
+        "working hours": ["working hours", "timings", "shifts"],
+        "other": ["benefits", "allowances", "disciplinary", "promotion", "increment"]
+    }
+
+    boosted = query
+    for key, kws in keywords.items():
+        if key in query.lower():
+            boosted += " " + " ".join(kws)
+    return boosted
+
+def search_docs(query: str, k: int = 6):
+    """Retrieve top-k relevant chunks from Chroma with keyword boosting."""
+    boosted_query = boost_query(query)
+    results = db.similarity_search(boosted_query, k=k)
     return results
 
 def build_answer(query: str, docs):
-    """Build an answer using both the docs and the LLM."""
+    """Force the model to only answer from handbook content."""
     if not docs:
         return "Sorry, I couldn’t find anything in the handbook for that."
 
     context_texts = "\n\n".join([d.page_content for d in docs])
 
     prompt = f"""
-    You are an HR policy assistant. 
-    Use ONLY the content below (from the Employee Handbook) to answer the question. 
-    If the answer is not found, say "Sorry, I couldn’t find anything in the handbook about that."
+    You are an HR assistant. 
+    ONLY use the following Employee Handbook content to answer. 
+    Do NOT guess. 
+    If the answer is not found in the handbook, reply: "Sorry, I couldn’t find anything in the handbook."
 
-    Handbook context:
+    Handbook Content:
     {context_texts}
 
     Question: {query}
 
-    Final Answer:
+    Answer strictly based on handbook content:
     """
 
     response = llm.invoke([("user", prompt)])
@@ -77,9 +90,13 @@ query = st.text_input("Your question:")
 
 if query:
     refined_query = clean_and_translate(query)
-    st.write(f"🔍 Interpreted Query: **{refined_query}**")
+    boosted_query = boost_query(refined_query)
 
-    docs = search_docs(refined_query, k=5)
+    st.write(f"🔍 Interpreted Query: **{refined_query}**")
+    if boosted_query != refined_query:
+        st.caption(f"(Boosted for better retrieval: {boosted_query})")
+
+    docs = search_docs(refined_query, k=6)
     answer = build_answer(refined_query, docs)
 
     st.write("### Answer:")
