@@ -3,102 +3,75 @@ from langchain_community.vectorstores import Chroma
 from langchain_community.embeddings import SentenceTransformerEmbeddings
 from langchain.prompts import ChatPromptTemplate
 from langchain_groq import ChatGroq
-import re
 from langdetect import detect
+import re
 
 # ----------------------------
-# CONFIG
+# Config
 # ----------------------------
-CHROMA_DIR = "chroma_db"
 EMBED_MODEL = "all-MiniLM-L6-v2"
+CHROMA_DIR = "chroma_db"
+TOP_K = 6
 
-# Force embeddings on CPU (fix for Streamlit Cloud)
-embeddings = SentenceTransformerEmbeddings(
-    model_name=EMBED_MODEL, model_kwargs={"device": "cpu"}
-)
-
-# ✅ Use Groq stable model
+# Groq LLM (updated to supported tool-use model)
 llm = ChatGroq(
     groq_api_key=st.secrets["GROQ_API_KEY"],
-    model="llama-3.1-70b-versatile"
+    model="llama3-groq-8b-8192-tool-use-preview"
 )
 
 # ----------------------------
-# UTILS
+# Helper functions
 # ----------------------------
 def clean_and_translate(query: str) -> str:
-    """Clean query, detect language, and translate Roman Urdu to English if needed."""
-    cleaned = re.sub(r"[^\w\s]", "", query).strip()
-
+    """Detect Roman Urdu/Urdu, translate to English for better retrieval."""
     try:
-        lang = detect(cleaned)
-    except Exception:
+        lang = detect(query)
+    except:
         lang = "en"
 
-    # If Urdu (or Roman Urdu detected as 'ur'), translate to English using LLM
-    if lang == "ur":
-        translation_prompt = ChatPromptTemplate.from_template(
-            "Translate this Roman Urdu text into English clearly:\n\n{q}"
-        )
-        translated = llm.invoke(translation_prompt.format_messages(q=cleaned))
+    if lang in ["ur", "ro"]:
+        # Ask LLM to translate Roman Urdu → English
+        translation_prompt = ChatPromptTemplate.from_messages([
+            ("system", "You are a helpful assistant. Translate Roman Urdu or Urdu text to English, keep meaning intact."),
+            ("user", query)
+        ])
+        translated = llm.invoke(translation_prompt.format_messages())
         return translated.content.strip()
-
-    return cleaned
-
+    else:
+        return query
 
 def boost_keywords(query: str) -> str:
-    """Boost retrieval by adding synonyms/keywords for HR terms."""
-    boosts = {
-        "leave": ["vacation", "annual leave", "holidays", "chutti"],
-        "notice": ["resignation", "exit period", "termination"],
-        "job": ["employment", "work", "additional job", "dual employment"],
-    }
-
-    lower_q = query.lower()
-    extra = []
-    for key, kws in boosts.items():
-        if key in lower_q:
-            extra.extend(kws)
-
-    if extra:
-        query += " " + " ".join(extra)
-
-    return query
-
+    """Add HR-related keywords to improve retrieval hits."""
+    extra_keywords = [
+        "leave policy", "annual leave", "notice period",
+        "probation", "resignation", "additional employment",
+        "working hours", "benefits", "holidays"
+    ]
+    return query + " " + " ".join(extra_keywords)
 
 def answer_question(query: str):
-    """Main pipeline: clean, translate, boost, retrieve, and answer."""
     cleaned = clean_and_translate(query)
     boosted = boost_keywords(cleaned)
 
+    embeddings = SentenceTransformerEmbeddings(model_name=EMBED_MODEL)
     db = Chroma(persist_directory=CHROMA_DIR, embedding_function=embeddings)
-    docs = db.similarity_search(boosted, k=5)
 
+    docs = db.similarity_search(boosted, k=TOP_K)
     if not docs:
-        return boosted, "Sorry, I couldn’t find anything in the handbook."
+        return cleaned, "Sorry, I couldn’t find anything in the handbook."
 
     context = "\n\n".join([d.page_content for d in docs])
 
-    prompt = ChatPromptTemplate.from_template(
-        """
-        You are an HR assistant. Answer only using the context below (from Employee Handbook).
-        If the answer is not found in the context, reply with:
-        "Sorry, I couldn’t find anything in the handbook."
+    prompt = ChatPromptTemplate.from_messages([
+        ("system", "You are an HR assistant. Use the provided context from the Employee Handbook to answer questions accurately. If the context is not enough, say you couldn’t find anything in the handbook. Keep answers concise."),
+        ("user", f"Context:\n{context}\n\nQuestion: {cleaned}\n\nAnswer:")
+    ])
 
-        Context:
-        {context}
-
-        Question:
-        {question}
-        """
-    )
-
-    response = llm.invoke(prompt.format_messages(context=context, question=boosted))
-    return boosted, response.content.strip()
-
+    response = llm.invoke(prompt.format_messages())
+    return cleaned, response.content.strip()
 
 # ----------------------------
-# STREAMLIT APP
+# Streamlit UI
 # ----------------------------
 st.title("📘 Employee Handbook Assistant")
 st.write("Ask a question in English or Roman Urdu about HR policies.")
@@ -107,9 +80,6 @@ query = st.text_input("Your question:")
 
 if query:
     with st.spinner("Thinking..."):
-        try:
-            refined_query, answer = answer_question(query)
-            st.write(f"🔍 **Interpreted Query:** {refined_query}")
-            st.write(f"\n**Answer:**\n{answer}")
-        except Exception as e:
-            st.error(f"⚠️ Error while generating answer: {e}")
+        refined_query, answer = answer_question(query)
+    st.write(f"🔍 **Interpreted Query:** {refined_query}")
+    st.write(f"### Answer:\n{answer}")
