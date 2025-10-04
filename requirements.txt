@@ -1,3 +1,4 @@
+streamlit
 langchain
 langchain-community
 langchain-core
@@ -5,6 +6,5 @@ langchain-text-splitters
 langchain-groq
 chromadb
 sentence-transformers
-streamlit
+torch
 langdetect
-deep-translator
