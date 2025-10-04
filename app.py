@@ -3,8 +3,8 @@ from langchain_community.vectorstores import Chroma
 from langchain_community.embeddings import SentenceTransformerEmbeddings
 from langchain.prompts import ChatPromptTemplate
 from langchain_groq import ChatGroq
+from deep_translator import GoogleTranslator
 import re
-import os
 
 # ----------------------------
 # CONFIG
@@ -27,39 +27,23 @@ db = Chroma(persist_directory=CHROMA_DIR, embedding_function=embeddings)
 # ----------------------------
 def clean_and_translate(query: str) -> str:
     """
-    Clean and (if needed) translate Roman Urdu → English before retrieval.
+    Translate Roman Urdu → English using local translator.
+    If it's already English, it will stay unchanged.
     """
-    query = query.strip()
-
-    translation_prompt = f"""
-    You are a translation assistant. If the following text is in Roman Urdu, translate it to clear English. 
-    If it's already English, leave it as is. Preserve HR terminology.
-
-    Text: "{query}"
-    """
-
     try:
-        response = llm.invoke([("user", translation_prompt)])
-        translated = response.content.strip()
+        translated = GoogleTranslator(source="auto", target="en").translate(query)
     except Exception as e:
-        print(f"Translation failed, fallback to raw query: {e}")
+        print(f"Translation failed, using raw query: {e}")
         translated = query
-
-    return translated
-
+    return translated.strip()
 
 def search_docs(query: str, k: int = 5):
-    """
-    Retrieve top-k relevant chunks from Chroma.
-    """
+    """Retrieve top-k relevant chunks from Chroma."""
     results = db.similarity_search(query, k=k)
     return results
 
-
 def build_answer(query: str, docs):
-    """
-    Build an answer using both the docs and the LLM.
-    """
+    """Build an answer using both the docs and the LLM."""
     if not docs:
         return "Sorry, I couldn’t find anything in the handbook for that."
 
