@@ -13,10 +13,10 @@ EMBED_MODEL = "all-MiniLM-L6-v2"
 CHROMA_DIR = "chroma_db"
 TOP_K = 6
 
-# Groq LLM (updated to supported tool-use model)
+# Groq LLM (stable supported model)
 llm = ChatGroq(
     groq_api_key=st.secrets["GROQ_API_KEY"],
-    model="llama3-groq-8b-8192-tool-use-preview"
+    model="llama-3.1-8b-instant"
 )
 
 # ----------------------------
@@ -30,9 +30,8 @@ def clean_and_translate(query: str) -> str:
         lang = "en"
 
     if lang in ["ur", "ro"]:
-        # Ask LLM to translate Roman Urdu → English
         translation_prompt = ChatPromptTemplate.from_messages([
-            ("system", "You are a helpful assistant. Translate Roman Urdu or Urdu text to English, keep meaning intact."),
+            ("system", "Translate Roman Urdu or Urdu to English, keeping meaning intact."),
             ("user", query)
         ])
         translated = llm.invoke(translation_prompt.format_messages())
@@ -63,7 +62,7 @@ def answer_question(query: str):
     context = "\n\n".join([d.page_content for d in docs])
 
     prompt = ChatPromptTemplate.from_messages([
-        ("system", "You are an HR assistant. Use the provided context from the Employee Handbook to answer questions accurately. If the context is not enough, say you couldn’t find anything in the handbook. Keep answers concise."),
+        ("system", "You are an HR assistant. Use the provided Employee Handbook context to answer questions accurately. If the context is not enough, say 'Sorry, I couldn’t find anything in the handbook.' Keep answers concise and relevant."),
         ("user", f"Context:\n{context}\n\nQuestion: {cleaned}\n\nAnswer:")
     ])
 
