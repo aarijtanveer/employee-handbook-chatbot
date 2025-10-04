@@ -1,6 +1,7 @@
 import streamlit as st
 import re
 from langdetect import detect
+from deep_translator import GoogleTranslator
 from langchain_community.vectorstores import Chroma
 from langchain_community.embeddings import SentenceTransformerEmbeddings
 from langchain.prompts import ChatPromptTemplate
@@ -12,13 +13,14 @@ from langchain_groq import ChatGroq
 EMBED_MODEL = "all-MiniLM-L6-v2"
 CHROMA_DIR = "chroma_db"
 
-# Force embeddings to CPU (fix for Streamlit Cloud)
+# Force embeddings to CPU (important for Streamlit Cloud)
 embeddings = SentenceTransformerEmbeddings(
     model_name=EMBED_MODEL,
     model_kwargs={"device": "cpu"}
 )
 vectordb = Chroma(persist_directory=CHROMA_DIR, embedding_function=embeddings)
 
+# Groq LLM for answering
 llm = ChatGroq(
     groq_api_key=st.secrets["GROQ_API_KEY"],
     model="llama3-8b-8192"
@@ -45,19 +47,18 @@ def boost_query(query: str) -> str:
 # Translation & Cleaning
 # ----------------------------
 def clean_and_translate(query: str) -> str:
-    """Detect language, translate Roman Urdu → English if needed."""
+    """Detect language, translate Roman Urdu → English using GoogleTranslator."""
     try:
         lang = detect(query)
     except:
         lang = "en"
 
     if lang != "en":
-        translation_prompt = ChatPromptTemplate.from_messages([
-            ("system", "You are a translator. Convert the following text from Roman Urdu to English."),
-            ("human", query)
-        ])
-        translated = llm.invoke(translation_prompt.format_messages())
-        query = translated.content.strip()
+        try:
+            query = GoogleTranslator(source="auto", target="en").translate(query)
+        except Exception:
+            # fallback: leave as is
+            pass
 
     query = re.sub(r"[^a-zA-Z0-9\s]", "", query)
     return query
@@ -84,8 +85,11 @@ def answer_question(query: str):
         ("human", boosted)
     ])
 
-    response = llm.invoke(prompt.format_messages())
-    return boosted, response.content.strip()
+    try:
+        response = llm.invoke(prompt.format_messages())
+        return boosted, response.content.strip()
+    except Exception as e:
+        return boosted, f"⚠️ Error while generating answer: {str(e)}"
 
 # ----------------------------
 # Streamlit UI
